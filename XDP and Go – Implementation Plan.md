@@ -61,7 +61,7 @@ Build a **stealth network gatekeeper** that makes protected services (e.g. SSH) 
                   │  │  eBPF/XDP program           │    │
                   │  │  - Packet parsing           │    │
                   │  │  - Knock state machine      │    │
-                  │  │  - Allowed IP check        │    │
+                  │  │  - Allowed IP check         │    │
                   │  │  - Rate limiting            │    │
                   │  │  - Return XDP_PASS / DROP   │    │
                   │  └─────────────────────────────┘    │
