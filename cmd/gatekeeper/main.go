@@ -8,7 +8,6 @@ import (
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
-	_ "github.com/cilium/ebpf/link"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -Wno-missing-declarations" -target bpf xdp ./../../bpf/xdp_knock.c -- -I./../../bpf
