@@ -29,14 +29,14 @@ func main() {
 
 	// Attach XDP program
 	xdpLink, err := link.AttachXDP(link.XDPOptions{
-		Program:   objs.xdpPrograms.XdpDrop,
+		Program:   objs.xdpPrograms.XdpKnock,
 		Interface: iface.Index,
 		Flags:     link.XDPDriverMode,
 	})
 	if err != nil {
 		log.Printf("XDP driver mode failed, falling back to generic mode: %v", err)
 		xdpLink, err = link.AttachXDP(link.XDPOptions{
-			Program:   objs.xdpPrograms.XdpDrop,
+			Program:   objs.xdpPrograms.XdpKnock,
 			Interface: iface.Index,
 			Flags:     link.XDPGenericMode,
 		})
