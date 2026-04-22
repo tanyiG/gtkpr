@@ -11,11 +11,11 @@ Hides your services (e.g. SSH) from port scanners and unauthorized access. Only 
 
 ## Project Status
 
-**Current phase:** Phase 2: “Hello XDP” – Default Drop finished and verified  
+**Current phase:** Phase 3: Packet Parsing - *verified*.  
 **Code:** 
 - `vmlinux.h`: generated
-- `xdp_knock.c`: drops every packages
-- `main.go`: initial version of Go loader 
+- `xdp_knock.c`: packet parsing / filtering rules implemented (*xdp_knock()*)
+- `main.go`: `XdpDrop` replaced by `XdpKnock`
 - `go.mod`: project requirements included
 
 This repository currently contains the detailed **implementation plan** for the project.
