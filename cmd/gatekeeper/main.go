@@ -20,8 +20,8 @@ func main() {
 	}
 	defer objs.Close()
 
-	// Choose network interface (loopback for testing)
-	ifaceName := "lo"
+	// Choose network interface (testns host interface)
+	ifaceName := "veth0"
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		log.Fatalf("Interface '%s' not found: %v", ifaceName, err)
