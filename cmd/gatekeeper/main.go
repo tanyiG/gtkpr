@@ -17,18 +17,29 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
 	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -Wno-missing-declarations" -target bpf xdp ./../../bpf/xdp_knock.c -- -I./../../bpf
 
-const (
-	protectedPort   = 22
-	backendAddr     = "127.0.0.1:2222"
-	cleanupInterval = 10 * time.Second
-	knockTimeout    = 30 * time.Second
-)
+// Config represents the YAML configuration structure.
+type Config struct {
+	Interface         string   `yaml:"interface"`
+	ProtectedPort     uint16   `yaml:"protected_port"`
+	BackendAddr       string   `yaml:"backend_addr"`
+	KnockSequence     []uint16 `yaml:"knock_sequence"`
+	KnockTimeoutSec   uint32   `yaml:"knock_timeout_sec"`
+	AccessDurationSec uint32   `yaml:"access_duration_sec"`
+}
 
-// debugEvent matches the C debug_event struct exactly.
+// eBPF config struct (must match the C struct config).
+type bpfConfig struct {
+	KnockTimeoutNS   uint64
+	AccessDurationNS uint64
+	ProtectedPort    uint16
+	_                [6]byte // padding for alignment
+}
+
 type debugEvent struct {
 	SrcIP        uint32
 	SrcPort      uint16
@@ -38,25 +49,63 @@ type debugEvent struct {
 	Timestamp    uint64
 }
 
+const (
+	configFile      = "../../config.yaml"
+	cleanupInterval = 10 * time.Second
+)
+
 func getMonotonicNs() uint64 {
 	var ts unix.Timespec
 	unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 	return uint64(ts.Nano())
 }
 
-func loadKnockSequence(knockSeqMap *ebpf.Map) error {
-	ports := []uint16{1111, 2222, 3333}
-	for i, port := range ports {
-		key := uint32(i)
-		if err := knockSeqMap.Put(&key, &port); err != nil {
-			return err
+func htons(val uint16) uint16 {
+	return (val<<8)&0xFF00 | (val>>8)&0x00FF
+}
+
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func applyConfig(objs *xdpObjects, cfg *Config) error {
+	// Convert seconds to nanoseconds for eBPF
+	knockTimeoutNS := uint64(cfg.KnockTimeoutSec) * 1_000_000_000
+	accessDurationNS := uint64(cfg.AccessDurationSec) * 1_000_000_000
+	protectedPortNet := htons(cfg.ProtectedPort)
+
+	bpfCfg := bpfConfig{
+		KnockTimeoutNS:   knockTimeoutNS,
+		AccessDurationNS: accessDurationNS,
+		ProtectedPort:    protectedPortNet,
+	}
+	key := uint32(0)
+	if err := objs.ConfigMap.Put(&key, &bpfCfg); err != nil {
+		return fmt.Errorf("failed to update config_map: %w", err)
+	}
+
+	// Populate knock sequence
+	for i, port := range cfg.KnockSequence {
+		k := uint32(i)
+		v := port // host byte order, the eBPF program uses bpf_ntohs
+		if err := objs.KnockSequenceMap.Put(&k, &v); err != nil {
+			return fmt.Errorf("failed to update knock_sequence_map: %w", err)
 		}
 	}
 	return nil
 }
 
-func cleanupMaps(knockMap, allowedMap *ebpf.Map) {
+func cleanupMaps(knockMap, allowedMap *ebpf.Map, knockTimeoutSec uint32) {
 	now := getMonotonicNs()
+	knockTimeoutNS := uint64(knockTimeoutSec) * 1_000_000_000
 
 	var srcIP uint32
 	var state struct {
@@ -65,7 +114,7 @@ func cleanupMaps(knockMap, allowedMap *ebpf.Map) {
 	}
 	iter := knockMap.Iterate()
 	for iter.Next(&srcIP, &state) {
-		if now-state.LastSeenNs > uint64(knockTimeout.Nanoseconds()) {
+		if now-state.LastSeenNs > knockTimeoutNS {
 			knockMap.Delete(&srcIP)
 		}
 	}
@@ -113,7 +162,6 @@ func startTCPProxy(listenAddr, targetAddr string) {
 	}
 }
 
-// displayDebugEvent formats and prints the received debug event.
 func displayDebugEvent(evt debugEvent) {
 	ip := net.IPv4(byte(evt.SrcIP), byte(evt.SrcIP>>8), byte(evt.SrcIP>>16), byte(evt.SrcIP>>24))
 	switch evt.EventType {
@@ -133,6 +181,12 @@ func displayDebugEvent(evt debugEvent) {
 }
 
 func main() {
+	// Load initial configuration
+	cfg, err := loadConfig(configFile)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	// Load eBPF objects
 	objs := xdpObjects{}
 	if err := loadXdpObjects(&objs, nil); err != nil {
@@ -140,13 +194,13 @@ func main() {
 	}
 	defer objs.Close()
 
-	// Populate knock sequence
-	if err := loadKnockSequence(objs.KnockSequenceMap); err != nil {
-		log.Fatalf("Failed to populate knock sequence: %v", err)
+	// Apply configuration to BPF maps
+	if err := applyConfig(&objs, cfg); err != nil {
+		log.Fatalf("Failed to apply config: %v", err)
 	}
 
-	// Attach to veth0
-	ifaceName := "veth0"
+	// Attach XDP to interface
+	ifaceName := cfg.Interface
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		log.Fatalf("Interface '%s' not found: %v", ifaceName, err)
@@ -178,12 +232,13 @@ func main() {
 		ticker := time.NewTicker(cleanupInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			cleanupMaps(objs.KnockStateMap, objs.AllowedIps)
+			cleanupMaps(objs.KnockStateMap, objs.AllowedIps, cfg.KnockTimeoutSec)
 		}
 	}()
 
 	// Start TCP proxy
-	go startTCPProxy(":22", backendAddr)
+	proxyListen := fmt.Sprintf(":%d", cfg.ProtectedPort)
+	go startTCPProxy(proxyListen, cfg.BackendAddr)
 
 	// Start perf event reader for debug events
 	rdr, err := perf.NewReader(objs.DebugEvents, os.Getpagesize())
@@ -213,10 +268,31 @@ func main() {
 
 	log.Printf("Gatekeeper running on interface %s. Press Ctrl+C to exit.", ifaceName)
 
-	// Wait for shutdown signal
+	// Set up signal handling for SIGHUP (config reload)
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	log.Println("Shutdown signal received, cleaning up...")
+	// Main event loop
+	for {
+		s := <-sig
+		switch s {
+		case syscall.SIGINT, syscall.SIGTERM:
+			log.Println("Shutdown signal received, cleaning up...")
+			return
+		case syscall.SIGHUP:
+			log.Println("SIGHUP received, reloading configuration...")
+			newCfg, err := loadConfig(configFile)
+			if err != nil {
+				log.Printf("Failed to reload config: %v", err)
+				continue
+			}
+			if err := applyConfig(&objs, newCfg); err != nil {
+				log.Printf("Failed to apply new config: %v", err)
+				continue
+			}
+			// Update cleanup timer with new timeout
+			cfg = newCfg
+			log.Println("Configuration reloaded successfully.")
+		}
+	}
 }

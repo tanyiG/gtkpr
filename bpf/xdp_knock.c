@@ -7,14 +7,18 @@
 #define ETH_P_IP 0x0800
 #define IPPROTO_UDP 17
 #define IPPROTO_TCP 6
-#define KNOCK_TIMEOUT_NS  30000000000ULL
-#define ACCESS_DURATION_NS 300000000000ULL
 #define MAX_KNOCK_STEPS 8
+
+struct config {
+    __u64 knock_timeout_ns;
+    __u64 access_duration_ns;
+    __u16 protected_port;
+};
 
 struct debug_event {
     __u32 src_ip;
     __u16 src_port;
-    __u8  event_type; // 0: NEW_KNOCK, 1: WRONG_KNOCK, 2: STEP_OK, 3: SEQUENCE_OK, 4: TCP_ACCESS
+    __u8  event_type; // 0:NEW_KNOCK, 1:WRONG_KNOCK, 2:STEP_OK, 3:SEQUENCE_OK, 4:TCP_ACCESS
     __u8  step;
     __u16 expected_port;
     __u64 timestamp;
@@ -24,6 +28,13 @@ struct knock_state {
     __u32 step;
     __u64 last_seen_ns;
 };
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct config);
+} config_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -68,12 +79,17 @@ int xdp_knock(struct xdp_md *ctx) {
     __u32 src_ip = ip->saddr;
     __u64 now = bpf_ktime_get_ns();
 
-    // --- TCP traffic to protected port (22) ---
+    // Read runtime configuration
+    __u32 config_key = 0;
+    struct config *cfg = bpf_map_lookup_elem(&config_map, &config_key);
+    if (!cfg) return XDP_DROP; // should never happen if Go loaded it
+
+    // --- TCP traffic to protected port ---
     if (ip->protocol == IPPROTO_TCP) {
         struct tcphdr *tcp = (void *)(ip + 1);
         if ((void *)(tcp + 1) > data_end) return XDP_DROP;
 
-        if (tcp->dest == bpf_htons(22)) {
+        if (tcp->dest == cfg->protected_port) {
             __u64 *expiry = bpf_map_lookup_elem(&allowed_ips, &src_ip);
             if (expiry && now < *expiry) {
                 struct debug_event evt = {
@@ -103,7 +119,7 @@ int xdp_knock(struct xdp_md *ctx) {
         new_state.step = 0;
         new_state.last_seen_ns = now;
         state = &new_state;
-    } else if (now - state->last_seen_ns > KNOCK_TIMEOUT_NS) {
+    } else if (now - state->last_seen_ns > cfg->knock_timeout_ns) {
         state->step = 0;
     }
 
@@ -131,19 +147,19 @@ int xdp_knock(struct xdp_md *ctx) {
         __u32 next_key = state->step;
         __u16 *next_port = bpf_map_lookup_elem(&knock_sequence_map, &next_key);
         if (!next_port || *next_port == 0) {
-            __u64 expiry = now + ACCESS_DURATION_NS;
+            __u64 expiry = now + cfg->access_duration_ns;
             bpf_map_update_elem(&allowed_ips, &src_ip, &expiry, BPF_ANY);
             bpf_map_delete_elem(&knock_state_map, &src_ip);
-            evt.event_type = 3; // SEQUENCE_OK
+            evt.event_type = 3;
         } else {
             bpf_map_update_elem(&knock_state_map, &src_ip, state, BPF_ANY);
-            evt.event_type = 2; // STEP_OK
+            evt.event_type = 2;
         }
     } else {
         state->step = 0;
         state->last_seen_ns = now;
         bpf_map_update_elem(&knock_state_map, &src_ip, state, BPF_ANY);
-        evt.event_type = 1; // WRONG_KNOCK
+        evt.event_type = 1;
     }
 
     bpf_perf_event_output(ctx, &debug_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
