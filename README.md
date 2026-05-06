@@ -1,6 +1,3 @@
-Az alábbiakban a jelenlegi README.md frissített változatát találod, amely pontosan tükrözi a projekt aktuális állapotát. A stílus és felépítés követi az eredeti dokumentumot, de részletesebb tartalommal, és a ténylegesen működő funkciókra épít. A `config.yaml`-ban nem szerepel `default_policy`, így a leírás is a jelenlegi, **csak a védett portot szűrő** viselkedést mutatja be.
-
-```markdown
 # gtkpr – eBPF/XDP Port Knocking Gatekeeper
 
 A high-performance, stealthy network gatekeeper built with **eBPF/XDP** and **Go**.
@@ -261,4 +258,3 @@ Inspired by:
 ---
 
 *This is a living document. Contributions and feedback are welcome.*
-```
